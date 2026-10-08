@@ -1,0 +1,23 @@
+{
+  "name": "@j-web/contracts",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "web member management foundation contracts (visitor/hosting lifecycle excluded)",
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "publishConfig": {
+    "registry": "http://127.0.0.1:4873/"
+  }
+}
