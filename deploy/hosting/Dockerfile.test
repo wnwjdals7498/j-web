@@ -1,0 +1,21 @@
+FROM node:22.18.0-bookworm-slim@sha256:752ea8a2f758c34002a0461bd9f1cee4f9a3c36d48494586f60ffce1fc708e0e
+RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    nginx=1.22.1-9+deb12u10 openssh-server=1:9.2p1-2+deb12u10 \
+    vsftpd=3.0.3-13+b2 sudo=1.9.13p3-1+deb12u4 sshpass=1.09-1+b1 \
+    python3=3.11.2-1+b1 openssl=3.0.22-1~deb12u1 procps=2:4.0.2-3 \
+    && rm -rf /var/lib/apt/lists/* && ln -s /usr/local/bin/node /usr/bin/node \
+    && groupadd --gid 1700 jweb-sftp && useradd --uid 1701 --no-create-home --shell /usr/sbin/nologin jweb \
+    && mkdir -p /srv/jweb /var/lib/jweb /var/lib/jweb-ftps/empty /etc/nginx/jweb.d /etc/jweb/tls /run/sshd \
+    && rm -f /etc/nginx/sites-enabled/default
+COPY deploy/jweb-helper.mjs /usr/local/sbin/jweb-helper
+COPY deploy/hosting/jweb.sudoers /etc/sudoers.d/jweb
+COPY deploy/hosting/sshd_config /etc/jweb/sshd_config
+COPY deploy/hosting/vsftpd.conf /etc/jweb/vsftpd.conf
+COPY tests/hosting/entrypoint.mjs /opt/jweb-fixture/entrypoint.mjs
+COPY tests/hosting/protocols.py /opt/jweb-fixture/protocols.py
+COPY apps/server/dist /opt/jweb-fixture/server
+RUN chmod 0555 /usr/local/sbin/jweb-helper && chmod 0440 /etc/sudoers.d/jweb \
+    && chmod 0600 /etc/jweb/sshd_config /etc/jweb/vsftpd.conf \
+    && chmod 0755 /opt/jweb-fixture && chmod -R a+rX /opt/jweb-fixture/server \
+    && visudo -cf /etc/sudoers.d/jweb
+ENTRYPOINT ["node", "/opt/jweb-fixture/entrypoint.mjs"]

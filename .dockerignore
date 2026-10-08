@@ -1,0 +1,10 @@
+node_modules
+.git
+.npmrc
+.env*
+**/*.env
+**/*.key
+**/node_modules
+**/.cache
+*.log
+*.tgz

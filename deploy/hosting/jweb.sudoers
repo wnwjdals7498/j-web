@@ -1,0 +1,4 @@
+Defaults:jweb env_reset
+Defaults:jweb secure_path="/usr/sbin:/usr/bin:/sbin:/bin"
+Defaults:jweb env_delete += "NODE_OPTIONS NODE_PATH LD_PRELOAD LD_LIBRARY_PATH"
+jweb ALL=(root) NOPASSWD:NOSETENV: /usr/local/sbin/jweb-helper

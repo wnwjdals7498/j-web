@@ -1,0 +1,21 @@
+services:
+  hosting:
+    image: jweb-isolated-hosting:20261008
+    build:
+      context: ../..
+      dockerfile: deploy/hosting/Dockerfile.test
+    environment:
+      JWEB_TEST_RUNTIME: isolated-cloud
+      JWEB_TEST_TENANT: ${JWEB_TEST_TENANT:?owned fixture tenant required}
+    # Kata/VFS named volumes share the system filesystem in this cloud.
+    # The fixture formats only its own 64 MiB image and mounts it inside this
+    # container. No host directory/device is passed; no production profile uses it.
+    cap_add: [SYS_ADMIN]
+    device_cgroup_rules: ["b 7:* rmw", "c 10:237 rmw"]
+    # Real daemons share the operating-system users and the same data mount.
+    # Tests execute inside this isolated container; no host listeners/caps are added.
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('fs').accessSync('/run/jweb-fixture.ready')"]
+      interval: 1s
+      timeout: 1s
+      retries: 30

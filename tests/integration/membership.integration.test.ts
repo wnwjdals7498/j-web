@@ -49,18 +49,22 @@ describe("actual web database and member boundary", () => {
     } finally {
       await otherDb.end();
     }
-    const checksum = (
-      await r.pool.query<{ checksum: string }>(
-        "SELECT checksum FROM schema_migrations LIMIT 1",
+    const migration = (
+      await r.pool.query<{ name: string; checksum: string }>(
+        "SELECT name,checksum FROM schema_migrations ORDER BY name LIMIT 1",
       )
-    ).rows[0]!.checksum;
-    await r.pool.query("UPDATE schema_migrations SET checksum='altered'");
+    ).rows[0]!;
+    await r.pool.query(
+      "UPDATE schema_migrations SET checksum='altered' WHERE name=$1",
+      [migration.name],
+    );
     try {
       await expect(migrate(r.pool)).rejects.toThrow("modified");
     } finally {
-      await r.pool.query("UPDATE schema_migrations SET checksum=$1", [
-        checksum,
-      ]);
+      await r.pool.query(
+        "UPDATE schema_migrations SET checksum=$1 WHERE name=$2",
+        [migration.checksum, migration.name],
+      );
     }
     await migrate(r.pool);
     await expect(
@@ -114,7 +118,7 @@ describe("actual web database and member boundary", () => {
       (await r.fetch("https://auth.jgw.test:55047" + WEB_PATHS.sites)).status,
     ).toBe(401);
   });
-  it("rejects source/tenant injection, invalid ids and keeps write lifecycle absent", async () => {
+  it("rejects source/tenant injection and invalid ids; writes fail closed without a data disk", async () => {
     for (const path of [
       WEB_PATHS.sites + "?tenant=other",
       WEB_PATHS.sites + "?limit=101",
@@ -130,10 +134,10 @@ describe("actual web database and member boundary", () => {
             Authorization: "Bearer " + r.actors[0]!.token,
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ domain: "never-created.example.test" }),
+          body: JSON.stringify({ domain: "never-created.jgw.test" }),
         })
       ).status,
-    ).toBe(404);
+    ).toBe(503);
   });
   it("returns 503 for actual unreachable fresh JWKS", async () => {
     const broken: typeof fetch = (input, init) =>

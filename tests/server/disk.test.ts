@@ -6,10 +6,15 @@ describe("fixed web data disk guard", () => {
     expect(
       dedicatedMount(system + "2 1 8:16 / /srv/jweb rw - ext4 /dev/sdb rw"),
     ).toEqual({ device: "8:16", type: "ext4" });
+    expect(
+      dedicatedMount(
+        system + "2 1 8:16 /volume /srv/jweb rw - ext4 /dev/sdb rw",
+      ),
+    ).toEqual({ device: "8:16", type: "ext4" });
     for (const extra of [
       "",
       "2 1 0:1 / /srv/jweb rw - ext4 /dev/sda rw",
-      "2 1 8:16 /somewhere /srv/jweb rw - ext4 /dev/sdb rw",
+      "2 1 0:1 /somewhere /srv/jweb rw - ext4 /dev/sda rw",
       "2 1 0:2 / /srv/jweb rw - tmpfs tmpfs rw",
       "2 1 8:16 / /srv/jweb ro - ext4 /dev/sdb ro",
       "2 1 8:16 / /srv/jweb rw - ext4 /dev/sdb rw\n3 1 8:17 / /srv/jweb rw - ext4 /dev/sdc rw",

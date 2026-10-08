@@ -2,6 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PoolConfig } from "pg";
 import { assertCustomerTenantId } from "@j-auth/contracts";
+import { isIP } from "node:net";
 
 const repository = fileURLToPath(new URL("../../../", import.meta.url));
 export function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -60,6 +61,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     issuer.pathname !== "/"
   )
     throw new Error("Require registered Keycloak HTTPS origin.");
+  if (env.JW_CUSTOMER_ADDRESS && isIP(env.JW_CUSTOMER_ADDRESS) !== 4)
+    throw new Error("Require a customer IPv4 address for DNS A guidance.");
   return {
     tenant,
     keycloakOrigin: issuer.origin,
@@ -67,5 +70,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     tlsCertificate: externalFile(required(env, "JW_TLS_CERTIFICATE")),
     tlsKey: externalFile(required(env, "JW_TLS_KEY")),
     database: loadDatabaseConfig(env),
+    customerAddress: env.JW_CUSTOMER_ADDRESS,
   };
 }

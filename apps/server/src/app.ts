@@ -8,11 +8,19 @@ import { WEB_PATHS } from "@j-web/contracts";
 import type { SiteView } from "@j-web/contracts";
 import { ApiError, unavailable, missing } from "./errors.js";
 import { memberGate } from "./auth.js";
+import { Hosting } from "./hosting.js";
+import type { WebDisk } from "./hosting.js";
+import type { HostingHelper } from "./hosting-helper.js";
 const ROUTES = new Set([
   "GET /health/live",
   "GET /health/ready",
   "GET /web/sites",
   "GET /web/sites/:id",
+  "GET /web/sites/:id/hosting",
+  "POST /web/sites",
+  "POST /web/sites/:id/retry",
+  "POST /web/sites/:id/account-password",
+  "DELETE /web/sites/:id",
 ]);
 export function createApp(options: {
   pool: Pool;
@@ -22,6 +30,10 @@ export function createApp(options: {
   fetch?: typeof globalThis.fetch;
   https?: HttpsOptions;
   logger?: FastifyServerOptions["logger"];
+  helper?: HostingHelper;
+  disk?: WebDisk;
+  domainSuffix?: string;
+  customerAddress?: string;
 }) {
   assertCustomerTenantId(options.tenant);
   const app = Fastify({
@@ -34,12 +46,16 @@ export function createApp(options: {
     logController: new LogController({ disableRequestLogging: true }),
   });
   const member = memberGate(options);
+  const hosting = new Hosting(options);
   app.addHook("onRoute", (route) => {
     if (!ROUTES.has(`${route.method} ${route.url}`))
       throw new Error("Route access must be declared.");
     if (route.url.startsWith("/web/"))
       route.onRequest = async (request) => {
-        await member(request, "web:read");
+        await member(
+          request,
+          route.method === "GET" ? "web:read" : "web:write",
+        );
       };
   });
   app.addHook("onRequest", async (_request, reply) => {
@@ -65,15 +81,74 @@ export function createApp(options: {
         { code: safe.code, requestId: request.id },
         "Web request unavailable",
       );
-    reply
-      .code(safe.status)
-      .send({ code: safe.code, message: safe.message, requestId: request.id });
+    reply.code(safe.status).send({
+      code: safe.code,
+      message: safe.message,
+      requestId: request.id,
+      ...(safe.siteId ? { siteId: safe.siteId, phase: safe.phase } : {}),
+    });
   });
   app.get("/health/live", async () => ({ status: "ok" }));
   app.get("/health/ready", async () => {
     await options.pool.query("SELECT checksum FROM schema_migrations LIMIT 1");
     return { status: "ok" };
   });
+  const params = {
+    type: "object",
+    additionalProperties: false,
+    required: ["id"],
+    properties: { id: { type: "string", format: "uuid" } },
+  };
+  const password = { type: "string", minLength: 12, maxLength: 256 };
+  const emptyQuery = { type: "object", additionalProperties: false };
+  const passwordBody = {
+    type: "object",
+    additionalProperties: false,
+    properties: { password },
+  };
+  app.post<{ Body: { domain: string; password?: string } }>(
+    WEB_PATHS.sites,
+    {
+      schema: {
+        querystring: emptyQuery,
+        body: {
+          type: "object",
+          additionalProperties: false,
+          required: ["domain"],
+          properties: { domain: { type: "string", maxLength: 253 }, password },
+        },
+      },
+    },
+    async (request, reply) => {
+      const result = await hosting.create(
+        request.body.domain,
+        request.body.password,
+      );
+      reply.code(201);
+      return result;
+    },
+  );
+  app.get<{ Params: { id: string } }>(
+    WEB_PATHS.sites + "/:id/hosting",
+    { schema: { params, querystring: emptyQuery } },
+    (request) => hosting.details(request.params.id),
+  );
+  app.post<{ Params: { id: string }; Body: { password?: string } }>(
+    WEB_PATHS.sites + "/:id/retry",
+    { schema: { params, querystring: emptyQuery, body: passwordBody } },
+    (request) => hosting.retry(request.params.id, request.body.password),
+  );
+  app.post<{ Params: { id: string }; Body: { password?: string } }>(
+    WEB_PATHS.sites + "/:id/account-password",
+    { schema: { params, querystring: emptyQuery, body: passwordBody } },
+    (request) =>
+      hosting.resetPassword(request.params.id, request.body.password),
+  );
+  app.delete<{ Params: { id: string } }>(
+    WEB_PATHS.sites + "/:id",
+    { schema: { params, querystring: emptyQuery } },
+    (request) => hosting.remove(request.params.id),
+  );
   app.get<{ Querystring: { limit: number; after?: string } }>(
     WEB_PATHS.sites,
     {

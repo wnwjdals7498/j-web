@@ -3,6 +3,8 @@ export class ApiError extends Error {
     public readonly status: number,
     public readonly code: string,
     message: string,
+    public readonly siteId?: string,
+    public readonly phase?: string,
   ) {
     super(message);
   }
