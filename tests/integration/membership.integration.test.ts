@@ -43,9 +43,15 @@ describe("actual web database and member boundary", () => {
       rolcreatedb: false,
       rolcreaterole: false,
     });
-    const otherDb = new Pool({ ...r.pool.options, database: "postgres" });
+    const otherDb = new Pool({
+      ...r.pool.options,
+      database: "postgres",
+      password: r.pool.options.password!,
+    });
     try {
-      await expect(otherDb.query("SELECT 1")).rejects.toThrow();
+      await expect(otherDb.query("SELECT 1")).rejects.toMatchObject({
+        code: "42501",
+      });
     } finally {
       await otherDb.end();
     }
