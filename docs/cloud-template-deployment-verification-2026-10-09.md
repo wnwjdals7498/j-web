@@ -28,3 +28,10 @@ image에 현재 helper를 읽기 전용으로 연결한 `compose.task25.yaml`을
 
 그룹웨어의 후속 상담 origin 등록은 배포 성공과 별도로 다룬다. 상세 동시 쓰기
 한계는 [hosting-contract.md](hosting-contract.md)를 따른다. 실제 VM 인수는 미실행이다.
+
+Task26에서 기존 이미지의 protocols.py가 새 contains/notContains 검사를
+포함하지 않았음을 확인했다. 위 pass 수의 해당 HTTP 내용 검사 범위를 정정한다.
+최종 소스에서 새 이미지를 빌드하고 설치 bytes·권한·음성 검사를 확인한 뒤,
+실제 hosting5·Web PG/HTTPS15를 두 driver에서 다시 통과했다. 상세 빌드 공간,
+보존·선별 cache 회수, 중간 실패와 최종 결과는
+[최종 이미지 검증](cloud-image-build-verification-2026-10-09.md)에 기록했다.
