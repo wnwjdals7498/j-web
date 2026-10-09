@@ -1,6 +1,6 @@
 import { before, after, test } from "node:test";
 import assert from "node:assert/strict";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { hostingRuntime } from "./runtime.mjs";
 let fixture;
 const siteId = randomUUID(),
@@ -282,4 +282,149 @@ test("password reset rejects the previous password; deletion and remove-all pres
     data: "gateway-preserved",
   });
   assert.equal((await fixture.helper("remove-all", {})).removed, 0);
+});
+test("deployment journal retries reuse one backup id and recover before and after atomic replacement", async () => {
+  const id = randomUUID();
+  const deploymentAccount = "jw-" + randomBytes(6).toString("hex");
+  const deploymentPassword = randomBytes(24).toString("base64url");
+  const origin = `journal-${id.slice(0, 8)}.jgw.test`;
+  const html = (revision, text) =>
+    `<!doctype html>\n<!-- j-web-managed-template:v1 revision:${revision} -->\n<html><body>${text}</body></html>\n`;
+  const firstPage = html(1, "first managed page"),
+    secondPage = html(2, "second managed page"),
+    thirdPage = html(3, "third managed page"),
+    digest = (value) => createHash("sha256").update(value).digest("hex");
+  const journalPath = `/var/lib/jweb/${id}.deploy.json`;
+  const backupDirectory = `/srv/jweb/backups/deploy/${id}`;
+  const putRootFile = async (file, content) =>
+    fixture.exec([
+      "node",
+      "-e",
+      "require('node:fs').writeFileSync(process.argv[1],process.argv[2],{mode:0o600})",
+      file,
+      content,
+    ]);
+  const replaceAtomicallyAsHelper = async (file, content) =>
+    fixture.exec([
+      "node",
+      "-e",
+      "const fs=require('node:fs');const{execFileSync}=require('node:child_process');const p=execFileSync('/usr/bin/getent',['passwd',process.argv[3]],{encoding:'utf8'}).trim().split(':');const g=execFileSync('/usr/bin/getent',['group','jweb-sftp'],{encoding:'utf8'}).trim().split(':');const t=process.argv[1]+'.crash-fixture';fs.writeFileSync(t,process.argv[2],{flag:'wx',mode:0o644});fs.chownSync(t,Number(p[2]),Number(g[2]));fs.chmodSync(t,0o644);fs.renameSync(t,process.argv[1]);",
+      file,
+      content,
+      deploymentAccount,
+    ]);
+  const writeJournal = async (record) =>
+    putRootFile(journalPath, JSON.stringify(record) + "\n");
+
+  assert.equal(
+    (
+      await fixture.helper("site-create", {
+        siteId: id,
+        domain: origin,
+      })
+    ).ok,
+    true,
+  );
+  assert.equal(
+    (
+      await fixture.helper("account-create", {
+        siteId: id,
+        account: deploymentAccount,
+        password: deploymentPassword,
+      })
+    ).ok,
+    true,
+  );
+  assert.equal((await fixture.helper("nginx-apply", { siteId: id })).ok, true);
+
+  const first = await fixture.helper("content-deploy", {
+    siteId: id,
+    revision: 1,
+    html: firstPage,
+  });
+  assert.equal(first.ok, true);
+  const beforeBackupId = randomUUID();
+  await writeJournal({
+    siteId: id,
+    revision: 2,
+    previousHash: digest(firstPage),
+    previousVersion: beforeBackupId,
+    sha256: digest(secondPage),
+  });
+  const beforeBackupRecovery = await fixture.helper("content-deploy", {
+    siteId: id,
+    revision: 2,
+    html: secondPage,
+  });
+  assert.equal(beforeBackupRecovery.ok, true);
+  assert.equal(beforeBackupRecovery.previousVersion, beforeBackupId);
+  assert.equal(
+    (await fixture.exec(["cat", `${backupDirectory}/${beforeBackupId}.html`]))
+      .output,
+    firstPage,
+  );
+  const repeated = await fixture.helper("content-deploy", {
+    siteId: id,
+    revision: 2,
+    html: secondPage,
+  });
+  assert.equal(repeated.deployed, false);
+  assert.equal(repeated.previousVersion, beforeBackupId);
+
+  const afterReplaceBackupId = randomUUID();
+  await fixture.exec(["mkdir", "-p", backupDirectory]);
+  await putRootFile(
+    `${backupDirectory}/${afterReplaceBackupId}.html`,
+    secondPage,
+  );
+  await writeJournal({
+    siteId: id,
+    revision: 3,
+    previousHash: digest(secondPage),
+    previousVersion: afterReplaceBackupId,
+    sha256: digest(thirdPage),
+  });
+  // Reproduce the state after the helper's atomic rename and before its
+  // journal-to-state finalization, then let a retry complete recovery.
+  await replaceAtomicallyAsHelper(
+    `/srv/jweb/sites/${id}/public/index.html`,
+    thirdPage,
+  );
+  const afterReplacementRecovery = await fixture.helper("content-deploy", {
+    siteId: id,
+    revision: 3,
+    html: thirdPage,
+  });
+  assert.equal(afterReplacementRecovery.ok, true);
+  assert.equal(afterReplacementRecovery.deployed, false);
+  assert.equal(afterReplacementRecovery.previousVersion, afterReplaceBackupId);
+  assert.equal(
+    (
+      await fixture.exec([
+        "cat",
+        `${backupDirectory}/${afterReplaceBackupId}.html`,
+      ])
+    ).output,
+    secondPage,
+  );
+  await fixture.protocols({
+    action: "https",
+    domain: origin,
+    target: "/",
+    contains: [thirdPage],
+  });
+
+  await writeJournal({
+    siteId: id,
+    revision: 4,
+    previousHash: null,
+    previousVersion: randomUUID(),
+    sha256: digest(html(4, "invalid journal")),
+  });
+  const invalidJournal = await fixture.helper("content-deploy", {
+    siteId: id,
+    revision: 4,
+    html: html(4, "invalid journal"),
+  });
+  assert.equal(invalidJournal.code, "invalid_state");
 });
