@@ -28,6 +28,7 @@ const SHAPES = {
   "account-delete": ["siteId", "account"],
   "nginx-apply": ["siteId"],
   "remove-all": [],
+  "retained-state": [],
 };
 export class HelperError extends Error {
   constructor(code, phase = "validation", details = {}) {
@@ -538,6 +539,16 @@ export async function runHelper(action, body) {
       s.phase = "created";
       await save(s);
       return s;
+    }
+    if (action === "retained-state") {
+      const all = await states(c);
+      if (all.some((s) => s.phase !== "deleted" || !s.backupId))
+        throw new HelperError("cleanup_incomplete", "lookup");
+      return {
+        tenant: c.tenant,
+        removed: 0,
+        backups: all.map((s) => s.backupId).sort(),
+      };
     }
     if (action === "remove-all") {
       const all = (await states(c)).filter((s) => s.phase !== "deleted");
