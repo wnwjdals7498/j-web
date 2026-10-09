@@ -142,6 +142,23 @@ test("actual SFTP and explicit TLS FTPS uploads are served by site HTTPS; plain 
     domain: "hosting-a.jgw.test",
     data,
   });
+  // A stale fixture image must not silently ignore the body assertions.
+  await assert.rejects(
+    fixture.protocols({
+      action: "https",
+      domain: "hosting-a.jgw.test",
+      contains: ["absent-marker-" + randomUUID()],
+    }),
+    /Actual protocol https failed/,
+  );
+  await assert.rejects(
+    fixture.protocols({
+      action: "https",
+      domain: "hosting-a.jgw.test",
+      notContains: [data],
+    }),
+    /Actual protocol https failed/,
+  );
   await fixture.protocols({
     action: "ftps-upload",
     account,

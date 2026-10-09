@@ -197,7 +197,7 @@ describe("actual web write lifecycle with PostgreSQL, exchanged members and root
     const content = {
       name: "<script>site</script>",
       introduction: "first page",
-      contact: "private contact",
+      contact: "public contact",
       logo: null,
     };
     expect(
@@ -249,8 +249,9 @@ describe("actual web write lifecycle with PostgreSQL, exchanged members and root
         "<!-- j-web-managed-template:v1 revision:1 -->",
         "&lt;script&gt;site&lt;/script&gt;",
         "gw." + r.fixtures[0]!.tenant + ".jgw.test/ext/talk/v1/widget.min.js",
+        "public contact",
       ],
-      notContains: ["private contact"],
+      notContains: ["<script>site</script>", ...r.secrets],
     });
 
     const updated = { ...content, introduction: "second page" };

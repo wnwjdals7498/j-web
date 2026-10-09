@@ -7,15 +7,19 @@ RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no
     && groupadd --gid 1700 jweb-sftp && useradd --uid 1701 --no-create-home --shell /usr/sbin/nologin jweb \
     && mkdir -p /srv/jweb /var/lib/jweb /var/lib/jweb-ftps/empty /etc/nginx/jweb.d /etc/jweb/tls /run/sshd \
     && rm -f /etc/nginx/sites-enabled/default
-COPY deploy/jweb-helper.mjs /usr/local/sbin/jweb-helper
-COPY deploy/hosting/jweb.sudoers /etc/sudoers.d/jweb
-COPY deploy/hosting/sshd_config /etc/jweb/sshd_config
-COPY deploy/hosting/vsftpd.conf /etc/jweb/vsftpd.conf
-COPY tests/hosting/entrypoint.mjs /opt/jweb-fixture/entrypoint.mjs
-COPY tests/hosting/protocols.py /opt/jweb-fixture/protocols.py
-COPY apps/server/dist /opt/jweb-fixture/server
-RUN chmod 0555 /usr/local/sbin/jweb-helper && chmod 0440 /etc/sudoers.d/jweb \
-    && chmod 0600 /etc/jweb/sshd_config /etc/jweb/vsftpd.conf \
-    && chmod 0755 /opt/jweb-fixture && chmod -R a+rX /opt/jweb-fixture/server \
+# Read-only BuildKit inputs keep file installation in one layer. The cloud's
+# VFS driver otherwise copies the whole filesystem for each small COPY step.
+RUN --mount=type=bind,source=deploy,target=/opt/jweb-build/deploy,readonly \
+    --mount=type=bind,source=tests/hosting,target=/opt/jweb-build/hosting,readonly \
+    --mount=type=bind,source=apps/server/dist,target=/opt/jweb-build/server,readonly \
+    install -m 0555 /opt/jweb-build/deploy/jweb-helper.mjs /usr/local/sbin/jweb-helper \
+    && install -m 0440 /opt/jweb-build/deploy/hosting/jweb.sudoers /etc/sudoers.d/jweb \
+    && install -m 0600 /opt/jweb-build/deploy/hosting/sshd_config /etc/jweb/sshd_config \
+    && install -m 0600 /opt/jweb-build/deploy/hosting/vsftpd.conf /etc/jweb/vsftpd.conf \
+    && install -d -m 0755 /opt/jweb-fixture/server \
+    && install -m 0644 /opt/jweb-build/hosting/entrypoint.mjs /opt/jweb-fixture/entrypoint.mjs \
+    && install -m 0644 /opt/jweb-build/hosting/protocols.py /opt/jweb-fixture/protocols.py \
+    && cp -R /opt/jweb-build/server/. /opt/jweb-fixture/server/ \
+    && chmod -R a+rX /opt/jweb-fixture/server \
     && visudo -cf /etc/sudoers.d/jweb
 ENTRYPOINT ["node", "/opt/jweb-fixture/entrypoint.mjs"]
