@@ -14,6 +14,7 @@ describe("actual web write lifecycle with PostgreSQL, exchanged members and root
     partialId: string;
   const password = randomBytes(24).toString("base64url"),
     replacement = randomBytes(24).toString("base64url");
+  const ownedSiteIds = new Set<string>();
   const call = (path: string, method = "GET", body?: unknown, actor = 0) =>
     r.fetch(`https://auth.jgw.test:${port}/web/sites${path}`, {
       method,
@@ -88,6 +89,7 @@ describe("actual web write lifecycle with PostgreSQL, exchanged members and root
       password: string;
     };
     id = created.id;
+    ownedSiteIds.add(id);
     account = created.account;
     expect(created.password).toBe(password);
     await h.protocols({
@@ -194,6 +196,7 @@ describe("actual web write lifecycle with PostgreSQL, exchanged members and root
       password: string;
     };
     r.secrets.add(site.password);
+    ownedSiteIds.add(site.id);
     const content = {
       name: "<script>site</script>",
       introduction: "first page",
@@ -316,6 +319,7 @@ describe("actual web write lifecycle with PostgreSQL, exchanged members and root
       password: string;
     };
     r.secrets.add(manualSite.password);
+    ownedSiteIds.add(manualSite.id);
     const manualBytes = "customer-managed-index-" + suffix;
     await h.protocols({
       action: "sftp-upload",
@@ -454,10 +458,29 @@ describe("actual web write lifecycle with PostgreSQL, exchanged members and root
       }[];
       next: string | null;
     };
-    expect(list.items).toHaveLength(1);
-    expect(list.items[0]!.id).toBe(id);
-    expect(BigInt(list.items[0]!.usedBytes)).toBeGreaterThan(0n);
-    expect(BigInt(list.items[0]!.disk.availableBytes)).toBeGreaterThan(0n);
+    const items: typeof list.items = [];
+    let page = list;
+    for (let index = 0; index <= ownedSiteIds.size; index++) {
+      expect(page.items).toHaveLength(1);
+      items.push(...page.items);
+      if (page.next === null) break;
+      const next = await call(
+        "/hosting?limit=1&after=" + encodeURIComponent(page.next),
+        "GET",
+        undefined,
+        1,
+      );
+      expect(next.status).toBe(200);
+      page = (await next.json()) as typeof list;
+    }
+    expect(page.next).toBeNull();
+    expect(items.map((item) => item.id).sort()).toEqual(
+      [...ownedSiteIds].sort(),
+    );
+    const original = items.find((item) => item.id === id)!;
+    expect(BigInt(original.usedBytes)).toBeGreaterThan(0n);
+    for (const item of items)
+      expect(BigInt(item.disk.availableBytes)).toBeGreaterThan(0n);
     expect(
       await (await call("/" + id + "/dns", "GET", undefined, 1)).json(),
     ).toEqual({
@@ -467,7 +490,7 @@ describe("actual web write lifecycle with PostgreSQL, exchanged members and root
       guidance: "DNS는 등록처·DNS 서비스에서 별도 관리합니다.",
       hostsEntry: "192.0.2.55 api-hosting.jgw.test",
     });
-    expect(JSON.stringify(list)).not.toContain(password);
+    expect(JSON.stringify(items)).not.toContain(password);
     expect((await call("/hosting?path=/etc", "GET", undefined, 1)).status).toBe(
       400,
     );
