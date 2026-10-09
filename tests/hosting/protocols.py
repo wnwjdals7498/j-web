@@ -76,6 +76,8 @@ try:
         response = https(request['domain'], request.get('target', '/index.html'))
         assert response.startswith(('HTTP/1.1 ' + str(request.get('status', 200))).encode())
         if 'data' in request: assert request['data'].encode() in response
+        for value in request.get('contains', []): assert value.encode() in response
+        for value in request.get('notContains', []): assert value.encode() not in response
     else: raise AssertionError('Unknown fixture action')
     print(json.dumps({'ok': True}))
 except Exception as error:

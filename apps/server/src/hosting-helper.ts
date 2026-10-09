@@ -6,6 +6,7 @@ export type HelperAction =
   | "account-passwd"
   | "account-delete"
   | "nginx-apply"
+  | "content-deploy"
   | "remove-all";
 export interface HelperResult {
   ok: boolean;
@@ -13,17 +14,20 @@ export interface HelperResult {
   code?: string;
   account?: string | null;
   backupId?: string;
+  revision?: number;
+  deployed?: boolean;
+  previousVersion?: string | null;
 }
 export interface HostingHelper {
   run(
     action: HelperAction,
-    body: Record<string, string>,
+    body: Record<string, string | number>,
   ): Promise<HelperResult>;
 }
 export class SudoHostingHelper implements HostingHelper {
   async run(
     action: HelperAction,
-    body: Record<string, string>,
+    body: Record<string, string | number>,
   ): Promise<HelperResult> {
     return new Promise((resolve, reject) => {
       const child = spawn(

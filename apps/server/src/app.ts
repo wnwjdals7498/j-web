@@ -24,6 +24,7 @@ const ROUTES = new Set([
   "GET /web/sites/:id/content",
   "PUT /web/sites/:id/content",
   "POST /web/sites/:id/preview",
+  "POST /web/sites/:id/deploy",
   "POST /web/sites",
   "POST /web/sites/:id/retry",
   "POST /web/sites/:id/account-password",
@@ -54,7 +55,11 @@ export function createApp(options: {
   });
   const member = memberGate(options);
   const hosting = new Hosting(options);
-  const content = new ContentStore(options.pool, options.tenant);
+  const content = new ContentStore(
+    options.pool,
+    options.tenant,
+    options.helper,
+  );
   app.addHook("onRoute", (route) => {
     if (!ROUTES.has(`${route.method} ${route.url}`))
       throw new Error("Route access must be declared.");
@@ -205,6 +210,28 @@ export function createApp(options: {
       },
     },
     (r) => content.preview(r.params.id, r.body.content),
+  );
+  app.post<{ Params: { id: string }; Body: { expectedRevision: number } }>(
+    WEB_PATHS.sites + "/:id/deploy",
+    {
+      schema: {
+        params,
+        querystring: emptyQuery,
+        body: {
+          type: "object",
+          additionalProperties: false,
+          required: ["expectedRevision"],
+          properties: {
+            expectedRevision: {
+              type: "integer",
+              minimum: 1,
+              maximum: 2147483647,
+            },
+          },
+        },
+      },
+    },
+    (r) => content.deploy(r.params.id, r.body.expectedRevision),
   );
   app.post<{ Body: { domain: string; password?: string } }>(
     WEB_PATHS.sites,

@@ -12,7 +12,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 const ROOT = "/srv/jweb",
   STATE = "/var/lib/jweb",
@@ -27,9 +27,11 @@ const SHAPES = {
   "account-passwd": ["siteId", "account", "password"],
   "account-delete": ["siteId", "account"],
   "nginx-apply": ["siteId"],
+  "content-deploy": ["siteId", "revision", "html"],
   "remove-all": [],
   "retained-state": [],
 };
+const MAX_DEPLOY_HTML = 1_500_000;
 export class HelperError extends Error {
   constructor(code, phase = "validation", details = {}) {
     super(code);
@@ -81,6 +83,22 @@ export function validateRequest(command, body) {
       /[\x00-\x1f\x7f:]/u.test(body.password))
   )
     throw new HelperError("invalid_password");
+  if (
+    body.revision !== undefined &&
+    (!Number.isSafeInteger(body.revision) ||
+      body.revision < 1 ||
+      body.revision > 2147483647)
+  )
+    throw new HelperError("invalid_revision");
+  if (
+    body.html !== undefined &&
+    (typeof body.html !== "string" ||
+      Buffer.byteLength(body.html) > MAX_DEPLOY_HTML ||
+      !body.html.startsWith(
+        `<!doctype html>\n<!-- j-web-managed-template:v1 revision:${body.revision} -->\n`,
+      ))
+  )
+    throw new HelperError("invalid_template");
   return body;
 }
 async function trusted(target, directory = false) {
@@ -122,6 +140,25 @@ async function atomic(target, content, mode = 0o600) {
   const temporary = target + "." + randomUUID() + ".partial";
   try {
     await writeFile(temporary, content, { flag: "wx", mode });
+    await rename(temporary, target);
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
+async function atomicSiteFile(target, content, owner, group) {
+  const parent = await lstat(path.dirname(target));
+  const root = await lstat(ROOT);
+  if (
+    !parent.isDirectory() ||
+    parent.isSymbolicLink() ||
+    parent.dev !== root.dev
+  )
+    throw new HelperError("unsafe_path", "filesystem");
+  const temporary = target + "." + randomUUID() + ".partial";
+  try {
+    await writeFile(temporary, content, { flag: "wx", mode: 0o644 });
+    await chown(temporary, owner, group);
+    await chmod(temporary, 0o644);
     await rename(temporary, target);
   } finally {
     await rm(temporary, { force: true });
@@ -207,6 +244,10 @@ async function config() {
   return c;
 }
 const statePath = (id) => STATE + "/" + id + ".json";
+const deployJournalPath = (id) => STATE + "/" + id + ".deploy.json";
+const deployBackupPath = (id, version) =>
+  ROOT + "/backups/deploy/" + id + "/" + version + ".html";
+const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 async function state(id, c) {
   const bytes = await optionalFile(statePath(id));
   if (!bytes || bytes.length > 4096)
@@ -241,6 +282,21 @@ async function state(id, c) {
     ).test(s.backupId)
   )
     throw new HelperError("invalid_state");
+  if (
+    (s.deploymentRevision !== undefined &&
+      (!Number.isSafeInteger(s.deploymentRevision) ||
+        s.deploymentRevision < 1 ||
+        s.deploymentRevision > 2147483647)) ||
+    (s.deploymentHash !== undefined &&
+      !/^[a-f0-9]{64}$/.test(s.deploymentHash)) ||
+    (s.previousVersion !== undefined &&
+      s.previousVersion !== null &&
+      !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(
+        s.previousVersion,
+      )) ||
+    (s.deploymentRevision === undefined) !== (s.deploymentHash === undefined)
+  )
+    throw new HelperError("invalid_state", "lookup");
   return s;
 }
 async function save(s) {
@@ -276,6 +332,228 @@ async function uid(account, id) {
   )
     throw new HelperError("unmanaged_account", "account");
   return n;
+}
+async function gid(name) {
+  const text = await command("/usr/bin/getent", ["group", name]);
+  const p = text.trim().split(":");
+  const n = Number(p[2]);
+  if (p[0] !== name || !Number.isInteger(n) || n < 1)
+    throw new HelperError("unmanaged_group", "account");
+  return n;
+}
+async function publicDirectory(s) {
+  await siteDirectory(s.siteId);
+  if (!s.account) throw new HelperError("account_required", "account");
+  const owner = await uid(s.account, s.siteId);
+  const [root, site, directory] = await Promise.all([
+    lstat(ROOT),
+    lstat(siteRoot(s.siteId)),
+    lstat(siteRoot(s.siteId) + "/public"),
+  ]);
+  const mountpoints = (await readFile("/proc/self/mountinfo", "utf8"))
+    .split("\n")
+    .map((line) => line.split(" ")[4]?.replaceAll("\\040", " "))
+    .filter((value) => typeof value === "string");
+  const publicPath = siteRoot(s.siteId) + "/public";
+  if (
+    !site.isDirectory() ||
+    site.isSymbolicLink() ||
+    !directory.isDirectory() ||
+    directory.isSymbolicLink() ||
+    site.dev !== root.dev ||
+    directory.dev !== root.dev ||
+    directory.uid !== owner ||
+    (directory.mode & 0o022) !== 0 ||
+    mountpoints.some(
+      (mountpoint) =>
+        mountpoint === siteRoot(s.siteId) ||
+        mountpoint.startsWith(siteRoot(s.siteId) + "/") ||
+        mountpoint === publicPath ||
+        mountpoint.startsWith(publicPath + "/"),
+    )
+  )
+    throw new HelperError("unsafe_path", "filesystem");
+  return { owner, directory };
+}
+async function readManagedIndex(s) {
+  const { owner, directory } = await publicDirectory(s);
+  const file = siteRoot(s.siteId) + "/public/index.html";
+  try {
+    const info = await lstat(file);
+    if (
+      !info.isFile() ||
+      info.isSymbolicLink() ||
+      info.dev !== directory.dev ||
+      info.uid !== owner ||
+      info.nlink !== 1 ||
+      (info.mode & 0o022) !== 0 ||
+      info.size > MAX_DEPLOY_HTML
+    )
+      throw new HelperError("unsafe_path", "filesystem");
+    const bytes = await readFile(file);
+    if (bytes.length !== info.size)
+      throw new HelperError("unsafe_path", "filesystem");
+    return { bytes, hash: sha256(bytes), owner, group: await gid("jweb-sftp") };
+  } catch (error) {
+    if (error.code === "ENOENT")
+      return { bytes: null, hash: null, owner, group: await gid("jweb-sftp") };
+    throw error;
+  }
+}
+async function deployJournal(id) {
+  const bytes = await optionalFile(deployJournalPath(id));
+  if (!bytes) return null;
+  if (bytes.length > 8192) throw new HelperError("invalid_state", "lookup");
+  let value;
+  try {
+    value = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    throw new HelperError("invalid_state", "lookup");
+  }
+  if (
+    !value ||
+    Object.keys(value).sort().join(",") !==
+      "previousHash,previousVersion,revision,sha256,siteId" ||
+    value.siteId !== id ||
+    !Number.isSafeInteger(value.revision) ||
+    value.revision < 1 ||
+    value.revision > 2147483647 ||
+    (value.previousHash !== null &&
+      !/^[a-f0-9]{64}$/.test(value.previousHash)) ||
+    (value.previousHash === null) !== (value.previousVersion === null) ||
+    !/^[a-f0-9]{64}$/.test(value.sha256) ||
+    (value.previousVersion !== null &&
+      !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(
+        value.previousVersion,
+      ))
+  )
+    throw new HelperError("invalid_state", "lookup");
+  return value;
+}
+async function finishJournal(s, journal) {
+  s.deploymentRevision = journal.revision;
+  s.deploymentHash = journal.sha256;
+  s.previousVersion = journal.previousVersion;
+  await save(s);
+  // A stale journal is harmless and will be finalized again on retry.
+  await rm(deployJournalPath(s.siteId), { force: true }).catch(() => undefined);
+}
+async function savePreviousVersion(s, version, bytes) {
+  const directory = path.dirname(deployBackupPath(s.siteId, version));
+  await rootDirectory(directory, true);
+  await chmod(directory, 0o700);
+  const file = deployBackupPath(s.siteId, version);
+  try {
+    await trusted(file);
+    if (!(await readFile(file)).equals(bytes))
+      throw new HelperError("backup_conflict", "backup");
+    return;
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  await atomic(file, bytes, 0o600);
+}
+async function removePreviousVersion(s, version) {
+  const file = deployBackupPath(s.siteId, version);
+  await rootDirectory(path.dirname(file));
+  await rm(file, { force: true });
+}
+async function deployContent(s, body) {
+  if (s.phase !== "active") throw new HelperError("invalid_state", "deploy");
+  const html = Buffer.from(body.html, "utf8");
+  const targetHash = sha256(html);
+  let current = await readManagedIndex(s);
+  let journal = await deployJournal(s.siteId);
+  if (journal) {
+    if (current.hash === journal.sha256) {
+      await finishJournal(s, journal);
+      journal = null;
+      current = await readManagedIndex(s);
+    } else if (current.hash === journal.previousHash) {
+      if (journal.revision !== body.revision) {
+        if (journal.previousVersion)
+          await removePreviousVersion(s, journal.previousVersion).catch(
+            () => undefined,
+          );
+        await rm(deployJournalPath(s.siteId), { force: true });
+        journal = null;
+      } else if (journal.sha256 !== targetHash) {
+        throw new HelperError("revision_conflict", "deploy");
+      }
+    } else {
+      throw new HelperError("template_conflict", "deploy");
+    }
+  }
+  if (journal && journal.revision !== body.revision)
+    throw new HelperError("site_busy", "deploy");
+  if (s.deploymentRevision === body.revision) {
+    if (current.hash !== s.deploymentHash)
+      throw new HelperError("template_conflict", "deploy");
+    if (targetHash !== s.deploymentHash)
+      throw new HelperError("revision_conflict", "deploy");
+    return {
+      revision: body.revision,
+      deployed: false,
+      previousVersion: s.previousVersion ?? null,
+    };
+  }
+  if (
+    s.deploymentRevision !== undefined &&
+    body.revision < s.deploymentRevision
+  )
+    throw new HelperError("revision_conflict", "deploy");
+  if (current.bytes && current.hash !== s.deploymentHash)
+    throw new HelperError("template_conflict", "deploy");
+  if (current.bytes && s.deploymentRevision === undefined)
+    throw new HelperError("template_conflict", "deploy");
+
+  const previousVersion = journal
+    ? journal.previousVersion
+    : current.bytes
+      ? randomUUID()
+      : null;
+  const record = journal ?? {
+    siteId: s.siteId,
+    revision: body.revision,
+    sha256: targetHash,
+    previousHash: current.hash,
+    previousVersion,
+  };
+  if (!journal)
+    await atomic(deployJournalPath(s.siteId), JSON.stringify(record) + "\n");
+  const file = siteRoot(s.siteId) + "/public/index.html";
+  try {
+    if (current.bytes && previousVersion)
+      await savePreviousVersion(s, previousVersion, current.bytes);
+    const beforeRename = await readManagedIndex(s);
+    if (beforeRename.hash !== current.hash)
+      throw new HelperError("template_conflict", "deploy");
+    await atomicSiteFile(file, html, current.owner, current.group);
+    await finishJournal(s, record);
+  } catch (error) {
+    // If the atomic rename already happened but state persistence failed, restore
+    // the prior bytes (or absence) before reporting failure. Journal remains for
+    // deterministic recovery if the rollback itself cannot complete.
+    try {
+      const after = await readManagedIndex(s);
+      if (after.hash === targetHash) {
+        if (current.bytes)
+          await atomicSiteFile(
+            file,
+            current.bytes,
+            current.owner,
+            current.group,
+          );
+        else await rm(file, { force: true });
+      }
+    } catch {
+      throw new HelperError("deploy_restore_failed", "deploy");
+    }
+    if (previousVersion)
+      await removePreviousVersion(s, previousVersion).catch(() => undefined);
+    throw error;
+  }
+  return { revision: body.revision, deployed: true, previousVersion };
 }
 async function ftpUsers(c) {
   const accounts = (await states(c))
@@ -574,6 +852,8 @@ export async function runHelper(action, body) {
     if (s.phase === "deleted" || s.phase === "backup_pending")
       throw new HelperError("site_not_found", "lookup");
     await siteDirectory(s.siteId);
+    if (action === "content-deploy")
+      return { ...s, ...(await deployContent(s, body)) };
     if (action === "account-create") {
       if (s.account !== null && s.account !== body.account)
         throw new HelperError("account_conflict");
@@ -674,7 +954,7 @@ async function main() {
   const chunks = [];
   for await (const chunk of process.stdin) {
     bytes += chunk.length;
-    if (bytes > 8192) throw new HelperError("invalid_request");
+    if (bytes > 2_000_000) throw new HelperError("invalid_request");
     chunks.push(chunk);
   }
   const value = JSON.parse(Buffer.concat(chunks).toString("utf8"));

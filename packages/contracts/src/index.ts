@@ -65,9 +65,17 @@ export interface WebError {
   siteId?: string;
   phase?: string;
 }
-// Deployment execution and its overwrite/version policy remain H7-unapproved.
-export interface DeploymentGate {
-  code: "deployment_policy_required";
+export interface DeploymentWrite {
+  expectedRevision: number;
+}
+/** Exact saved revision; manual/unmanaged index changes produce a conflict. */
+export interface DeploymentView {
+  siteId: string;
+  revision: number;
+  origin: string;
+  deployed: boolean;
+  /** Opaque private backup identifier, never a filesystem path. */
+  previousVersion: string | null;
 }
 export function isSiteDomain(
   value: unknown,

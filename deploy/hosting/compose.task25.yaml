@@ -1,0 +1,8 @@
+services:
+  hosting:
+    image: jweb-isolated-hosting:20261008
+    user: "root"
+    entrypoint: ["node", "/opt/jweb-task25/entrypoint.mjs"]
+    volumes:
+      - ../../deploy/jweb-helper.mjs:/opt/jweb-task25/jweb-helper.mjs:ro
+      - ../../tests/hosting/task25-entrypoint.mjs:/opt/jweb-task25/entrypoint.mjs:ro

@@ -29,7 +29,7 @@ Nginx 설정은 helper가 고정 템플릿으로 렌더링한다. API가 만든 
 | WB-07 | H4 | j-web aud token→tenant·web 권한 | 401/403·다른 tenant 404·JWKS 장애 503 | WB-T01 |
 | WB-10 | H7 | 필드/로고→검증된 콘텐츠 | web:write, 로고 형식/크기 H2 고정·임의 경로 불가 | WB-T04 |
 | WB-11 | H7 | 콘텐츠→HTML escape 미리보기 | web:write, 입력 script 미실행·운영 파일은 아직 불변 | WB-T04 |
-| WB-12 | H7 | 검증 콘텐츠→원자적 교체·직전 버전·origin 반환 | web:write, 실패 시 직전 페이지 유지·중간 파일 노출 없음 | WB-T04 |
+| WB-12 | H7 | 현재 저장 revision의 템플릿 index만 원자 교체·직전 managed version·origin 반환 | web:write, 수동/드리프트 index는 409, 임의 파일은 보존, 실패 시 직전 페이지 유지 | WB-T04 |
 | WB-13 | H7 | 생성 템플릿→위젯 script 항상 포함 | 가입 무관·정적 사이트 익명·비밀키 없음 | WB-T04 |
 | WB-20 | H6 | 고정 하위 명령→검증·특권 작업·Nginx 검사 | sudoers 1파일·임의 명령/경로/환경 주입 거절 | WB-T02 |
 | WB-21 | H6 | 별도 server block→site HTTPS 서빙 | gw 블록 분리·로컬 CA/SAN·다른 사이트 자료 접근 불가 | WB-T02 |
@@ -49,7 +49,7 @@ Nginx 설정은 helper가 고정 템플릿으로 렌더링한다. API가 만든 
 | WB-T01 | read/write 권한·사이트 목록/용량·DNS 안내, 직접 쓰기 403·다른 tenant 404·JWKS 장애 503, DNS API 호출 없음. |
 | WB-T02 | 정상 사이트 생성·도메인 규격/접미사/중복·helper 명령/UUID/계정/경로 주입 거절, 마운트 누락·nginx -t 실패 복구·부분 실패 재시도, gw 블록과 다른 site 보존. |
 | WB-T03 | 실제 SFTP·명시 TLS FTPS 업로드·HTTPS 서빙, 평문 FTP·셸·포워딩·다른 site 거절, 암호 교체·DB/로그/목록 원문 없음. FTPS 제품별 passive 연결도 확인. |
-| WB-T04 | script 입력 escape·로고 경계·미리보기 시 운영 파일 불변·배포 원자적 교체/실패 시 기존 페이지 유지·직전 버전 보관, 가입 무관 위젯 삽입·정적 페이지 비밀값 없음. |
+| WB-T04 | script 입력 escape·로고 경계·미리보기 시 운영 파일 불변·원자 deploy/same revision retry/hash drift 거절·기존 수동 index 충돌 보존·직전 managed version 보관·가입 무관 위젯 삽입·정적 페이지 비밀값 없음. |
 | WB-T05 | contracts 설치·DB/migration·설치/해지 remove-all·파일 백업, VM 실제 H8·사이트 HTTPS·BFF 출처 등록과 권한 없음 안내. |
 
 ## 확정 관문

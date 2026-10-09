@@ -1,6 +1,6 @@
 services:
   hosting:
-    image: jweb-isolated-hosting:20261008
+    image: ${JWEB_TEST_IMAGE:-jweb-isolated-hosting:20261008}
     build:
       context: ../..
       dockerfile: deploy/hosting/Dockerfile.test

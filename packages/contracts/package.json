@@ -1,8 +1,8 @@
 {
   "name": "@j-web/contracts",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "type": "module",
-  "description": "fixed member hosting, DNS, content and readonly preview contracts; public deployment policy excluded",
+  "description": "member hosting, DNS, content, readonly preview and conservative saved-revision deployment contracts",
   "files": [
     "dist",
     "README.md",

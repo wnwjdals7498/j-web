@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 export async function hostingRuntime(tenant) {
   if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(tenant))
@@ -19,6 +20,8 @@ export async function hostingRuntime(tenant) {
     "-f",
     "deploy/hosting/compose.test.yaml",
   ];
+  if (env.JWEB_TEST_COMPOSE_OVERRIDE)
+    composeArgs.push("-f", env.JWEB_TEST_COMPOSE_OVERRIDE);
   async function run(args, input = "", acceptFailure = false) {
     return new Promise((resolve, reject) => {
       const child = spawn("docker", args, {
@@ -93,6 +96,25 @@ export async function hostingRuntime(tenant) {
       true,
       user,
     );
+    if (env.JWEB_TEST_COMPOSE_OVERRIDE) {
+      const localHelper = await readFile(
+        repository + "/deploy/jweb-helper.mjs",
+      );
+      const expectedHash = createHash("sha256")
+        .update(localHelper)
+        .digest("hex");
+      const installedHash = (
+        await exec(["sha256sum", "/usr/local/sbin/jweb-helper"])
+      ).output
+        .trim()
+        .split(/\s+/)[0];
+      if (installedHash !== expectedHash) {
+        await close().catch(() => {});
+        throw new Error(
+          "Mounted hosting helper SHA-256 does not match source.",
+        );
+      }
+    }
     const value = JSON.parse(result.output);
     if (value.ok ? result.code !== 0 : result.code === 0)
       throw new Error("Helper exit/result disagree.");

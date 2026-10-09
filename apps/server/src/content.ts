@@ -8,7 +8,10 @@ import type {
   PreviewView,
 } from "@j-web/contracts";
 import type { Pool } from "pg";
+import type { PoolClient } from "pg";
 import { ApiError, missing } from "./errors.js";
+import { SudoHostingHelper } from "./hosting-helper.js";
+import type { HostingHelper } from "./hosting-helper.js";
 const invalid = () =>
   new ApiError(400, "invalid_content", "Invalid page content.");
 const exact = (v: unknown, keys: string[]): v is Record<string, unknown> =>
@@ -158,10 +161,22 @@ export function renderPreview(tenant: string, input: unknown) {
     html: `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; script-src 'none'; base-uri 'none'; form-action 'none'"><title>${escape(c.name)}</title></head><body><main>${c.logo ? `<img alt="" src="data:image/png;base64,${c.logo.base64}">` : ""}<h1>${escape(c.name)}</h1><p>${escape(c.introduction)}</p><p>${escape(c.contact)}</p></main>${snippet}</body></html>`,
   };
 }
+export function renderSiteTemplate(
+  tenant: string,
+  input: unknown,
+  revision: number,
+) {
+  if (!Number.isSafeInteger(revision) || revision < 1 || revision > 2147483647)
+    throw invalid();
+  const c = validateContent(input),
+    snippet = widgetSnippet(tenant);
+  return `<!doctype html>\n<!-- j-web-managed-template:v1 revision:${revision} -->\n<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escape(c.name)}</title><style>body{font-family:system-ui,sans-serif;line-height:1.6;margin:0;color:#18212f;background:#f5f7fa}main{box-sizing:border-box;max-width:52rem;margin:5vh auto;padding:2rem;background:white;border-radius:1rem;box-shadow:0 1rem 3rem #18212f18}img{display:block;max-width:12rem;max-height:12rem;object-fit:contain;margin-bottom:1.5rem}h1{line-height:1.2;overflow-wrap:anywhere}p{white-space:pre-wrap;overflow-wrap:anywhere}</style></head><body><main>${c.logo ? `<img alt="" src="data:image/png;base64,${c.logo.base64}">` : ""}<h1>${escape(c.name)}</h1><p>${escape(c.introduction)}</p><p>${escape(c.contact)}</p></main>${snippet}</body></html>\n`;
+}
 export class ContentStore {
   constructor(
     private readonly pool: Pool,
     private readonly tenant: string,
+    private readonly helper: HostingHelper = new SudoHostingHelper(),
   ) {
     assertCustomerTenantId(tenant);
   }
@@ -243,5 +258,135 @@ export class ContentStore {
       origin: "https://" + site.domain,
       ...renderPreview(this.tenant, content),
     };
+  }
+  async deploy(id: string, expectedRevision: number) {
+    if (
+      !Number.isSafeInteger(expectedRevision) ||
+      expectedRevision < 1 ||
+      expectedRevision > 2147483647
+    )
+      throw invalid();
+    const client: PoolClient = await this.pool.connect();
+    let locked = false,
+      discard = false;
+    const lockKey = this.tenant + ":web-site:" + id;
+    try {
+      locked = (
+        await client.query<{ locked: boolean }>(
+          "SELECT pg_try_advisory_lock(hashtextextended($1,0)) AS locked",
+          [lockKey],
+        )
+      ).rows[0]!.locked;
+      if (!locked)
+        throw new ApiError(409, "site_busy", "Site operation already running.");
+      const result = await client.query<{
+        domain: string;
+        state: string;
+        revision: number | null;
+        content: PageContent | null;
+      }>(
+        "SELECT s.domain,s.state,c.revision,c.content FROM sites s LEFT JOIN site_content c USING(tenant_id,site_id) WHERE s.tenant_id=$1 AND s.site_id=$2",
+        [this.tenant, id],
+      );
+      const site = result.rows[0];
+      if (!site) throw missing();
+      if (site.state !== "active")
+        throw new ApiError(409, "invalid_state", "Site is not active.");
+      if (site.revision !== expectedRevision)
+        throw new ApiError(
+          409,
+          "content_conflict",
+          "Content changed. Reload before deploying.",
+        );
+      if (!site.content)
+        throw new ApiError(
+          409,
+          "content_required",
+          "Save content before deploying.",
+        );
+      const html = renderSiteTemplate(
+        this.tenant,
+        site.content,
+        expectedRevision,
+      );
+      let deployed;
+      try {
+        deployed = await this.helper.run("content-deploy", {
+          siteId: id,
+          revision: expectedRevision,
+          html,
+        });
+      } catch {
+        throw new ApiError(
+          503,
+          "helper_unavailable",
+          "Deployment helper unavailable.",
+          id,
+          "deploy",
+        );
+      }
+      if (!deployed.ok) {
+        const code =
+          deployed.code && /^[a-z0-9_]{1,64}$/.test(deployed.code)
+            ? deployed.code
+            : "helper_failed";
+        if (
+          [
+            "site_busy",
+            "template_conflict",
+            "revision_conflict",
+            "invalid_state",
+          ].includes(code)
+        )
+          throw new ApiError(
+            409,
+            code,
+            "Deployment conflicts with current site state.",
+            id,
+            "deploy",
+          );
+        throw new ApiError(
+          503,
+          code,
+          "Deployment incomplete. Retry this revision.",
+          id,
+          "deploy",
+        );
+      }
+      if (
+        deployed.revision !== expectedRevision ||
+        typeof deployed.deployed !== "boolean" ||
+        (deployed.previousVersion !== null &&
+          deployed.previousVersion !== undefined &&
+          !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(
+            deployed.previousVersion,
+          ))
+      )
+        throw new ApiError(
+          503,
+          "helper_unavailable",
+          "Deployment helper returned invalid result.",
+          id,
+          "deploy",
+        );
+      return {
+        siteId: id,
+        revision: expectedRevision,
+        origin: "https://" + site.domain,
+        deployed: deployed.deployed,
+        previousVersion: deployed.previousVersion ?? null,
+      };
+    } finally {
+      if (locked)
+        try {
+          await client.query(
+            "SELECT pg_advisory_unlock(hashtextextended($1,0))",
+            [lockKey],
+          );
+        } catch {
+          discard = true;
+        }
+      client.release(discard);
+    }
   }
 }

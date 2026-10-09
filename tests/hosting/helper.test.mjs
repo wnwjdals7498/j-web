@@ -26,4 +26,25 @@ test("privileged helper rejects unsupported fields, traversal, config and accoun
   assert.throws(() =>
     renderSite({ siteId, domain: "site.jgw.test;include /etc/*;" }),
   );
+  assert.throws(() =>
+    validateRequest("content-deploy", {
+      siteId,
+      revision: 0,
+      html: "<!doctype html>\n<!-- j-web-managed-template:v1 revision:0 -->\n",
+    }),
+  );
+  assert.throws(() =>
+    validateRequest("content-deploy", {
+      siteId,
+      revision: 1,
+      html: "<!doctype html><script>arbitrary</script>",
+    }),
+  );
+  assert.doesNotThrow(() =>
+    validateRequest("content-deploy", {
+      siteId,
+      revision: 1,
+      html: "<!doctype html>\n<!-- j-web-managed-template:v1 revision:1 -->\n<html></html>",
+    }),
+  );
 });

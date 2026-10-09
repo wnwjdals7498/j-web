@@ -4,6 +4,7 @@ import { CONTENT_LIMITS, isSiteDomain } from "@j-web/contracts";
 import {
   validateContent,
   renderPreview,
+  renderSiteTemplate,
   widgetSnippet,
 } from "../../apps/server/src/content.js";
 const png = readFileSync(new URL("../fixtures/logo-rgba.png", import.meta.url));
@@ -81,5 +82,19 @@ describe("bounded page input and inert static preview", () => {
       "site.jgw.test/path",
     ])
       expect(isSiteDomain(value, "tenant")).toBe(false);
+  });
+  it("renders only the saved text as escaped markup and deploys one revision-tagged index with the widget", () => {
+    const rendered = renderSiteTemplate("content-fixture", content, 7);
+    expect(rendered).toContain(
+      "<!doctype html>\n<!-- j-web-managed-template:v1 revision:7 -->",
+    );
+    expect(rendered).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(rendered).not.toContain("<img src=x onerror");
+    expect(rendered).toContain("<style>");
+    expect(rendered).toContain(
+      "gw.content-fixture.jgw.test/ext/talk/v1/widget.min.js",
+    );
+    expect(rendered).not.toContain("preview");
+    expect(() => renderSiteTemplate("content-fixture", content, 0)).toThrow();
   });
 });

@@ -181,6 +181,190 @@ describe("actual web write lifecycle with PostgreSQL, exchanged members and root
       ).rows[0],
     ).toEqual({ revision: 1, content });
   });
+  it("deploys only a saved revision atomically, keeps private previous versions, and rejects manual index conflicts", async () => {
+    const suffix = randomUUID().slice(0, 8);
+    const created = await call("", "POST", {
+      domain: `template-${suffix}.jgw.test`,
+    });
+    expect(created.status).toBe(201);
+    const site = (await created.json()) as {
+      id: string;
+      domain: string;
+      account: string;
+      password: string;
+    };
+    r.secrets.add(site.password);
+    const content = {
+      name: "<script>site</script>",
+      introduction: "first page",
+      contact: "private contact",
+      logo: null,
+    };
+    expect(
+      (
+        await call(
+          "/" + site.id + "/deploy",
+          "POST",
+          { expectedRevision: 1 },
+          1,
+        )
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await call("/" + site.id + "/content", "PUT", {
+          expectedRevision: 0,
+          content,
+        })
+      ).status,
+    ).toBe(200);
+    const first = await call("/" + site.id + "/deploy", "POST", {
+      expectedRevision: 1,
+    });
+    expect(first.status).toBe(200);
+    const deployed = (await first.json()) as {
+      siteId: string;
+      revision: number;
+      origin: string;
+      deployed: boolean;
+      previousVersion: string | null;
+    };
+    expect(deployed).toEqual({
+      siteId: site.id,
+      revision: 1,
+      origin: "https://" + site.domain,
+      deployed: true,
+      previousVersion: null,
+    });
+    const retry = await call("/" + site.id + "/deploy", "POST", {
+      expectedRevision: 1,
+    });
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toEqual({ ...deployed, deployed: false });
+    await h.protocols({
+      action: "https",
+      domain: site.domain,
+      target: "/",
+      contains: [
+        "<!-- j-web-managed-template:v1 revision:1 -->",
+        "&lt;script&gt;site&lt;/script&gt;",
+        "gw." + r.fixtures[0]!.tenant + ".jgw.test/ext/talk/v1/widget.min.js",
+      ],
+      notContains: ["private contact"],
+    });
+
+    const updated = { ...content, introduction: "second page" };
+    expect(
+      (
+        await call("/" + site.id + "/content", "PUT", {
+          expectedRevision: 1,
+          content: updated,
+        })
+      ).status,
+    ).toBe(200);
+    await h.exec(["mkdir", "-p", "/srv/jweb/backups/deploy"]);
+    const unsafeBackupDirectory = `/srv/jweb/backups/deploy/${site.id}`;
+    await h.exec(["ln", "-s", "/tmp", unsafeBackupDirectory]);
+    const failedReplacement = await call("/" + site.id + "/deploy", "POST", {
+      expectedRevision: 2,
+    });
+    expect(failedReplacement.status).toBe(503);
+    expect(await failedReplacement.json()).toMatchObject({
+      code: "unsafe_path",
+      phase: "deploy",
+    });
+    await h.protocols({
+      action: "https",
+      domain: site.domain,
+      target: "/",
+      contains: ["<!-- j-web-managed-template:v1 revision:1 -->", "first page"],
+    });
+    await h.exec(["rm", unsafeBackupDirectory]);
+    const second = await call("/" + site.id + "/deploy", "POST", {
+      expectedRevision: 2,
+    });
+    expect(second.status).toBe(200);
+    const next = (await second.json()) as typeof deployed;
+    expect(next).toMatchObject({ revision: 2, deployed: true });
+    expect(next.previousVersion).toMatch(/^[a-f0-9-]{36}$/);
+    const backup = await h.exec([
+      "cat",
+      `/srv/jweb/backups/deploy/${site.id}/${next.previousVersion}.html`,
+    ]);
+    expect(backup.output).toContain(
+      "<!-- j-web-managed-template:v1 revision:1 -->",
+    );
+    await h.protocols({
+      action: "https",
+      domain: site.domain,
+      target: "/",
+      contains: [
+        "<!-- j-web-managed-template:v1 revision:2 -->",
+        "second page",
+      ],
+    });
+
+    const manualSiteResponse = await call("", "POST", {
+      domain: `manual-${suffix}.jgw.test`,
+    });
+    expect(manualSiteResponse.status).toBe(201);
+    const manualSite = (await manualSiteResponse.json()) as {
+      id: string;
+      domain: string;
+      account: string;
+      password: string;
+    };
+    r.secrets.add(manualSite.password);
+    const manualBytes = "customer-managed-index-" + suffix;
+    await h.protocols({
+      action: "sftp-upload",
+      account: manualSite.account,
+      password: manualSite.password,
+      name: "index.html",
+      data: manualBytes,
+    });
+    expect(
+      (
+        await call("/" + manualSite.id + "/content", "PUT", {
+          expectedRevision: 0,
+          content,
+        })
+      ).status,
+    ).toBe(200);
+    const conflict = await call("/" + manualSite.id + "/deploy", "POST", {
+      expectedRevision: 1,
+    });
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({ code: "template_conflict" });
+    expect(
+      await h.protocols({
+        action: "https",
+        domain: manualSite.domain,
+        data: manualBytes,
+      }),
+    ).toMatchObject({ ok: true });
+
+    const driftBytes = "manually-edited-managed-index-" + suffix;
+    await h.protocols({
+      action: "sftp-upload",
+      account: site.account,
+      password: site.password,
+      name: "index.html",
+      data: driftBytes,
+    });
+    const drift = await call("/" + site.id + "/deploy", "POST", {
+      expectedRevision: 2,
+    });
+    expect(drift.status).toBe(409);
+    expect(await drift.json()).toMatchObject({ code: "template_conflict" });
+    expect(
+      await h.protocols({
+        action: "https",
+        domain: site.domain,
+        data: driftBytes,
+      }),
+    ).toMatchObject({ ok: true });
+  });
   it("enforces content authorization, tenant ownership, stale revisions and format errors before changing the stored page", async () => {
     const content = {
       name: "Example",
@@ -256,7 +440,7 @@ describe("actual web write lifecycle with PostgreSQL, exchanged members and root
     expect(
       (await call("/" + id + "/deploy", "POST", { expectedRevision: 1 }))
         .status,
-    ).toBe(404);
+    ).toBe(409);
   });
   it("lists actual disk usage and DNS/hosts advice with tenant pagination and no DNS write or secret exposure", async () => {
     const response = await call("/hosting?limit=1", "GET", undefined, 1);
