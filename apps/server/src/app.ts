@@ -11,12 +11,19 @@ import { memberGate } from "./auth.js";
 import { Hosting } from "./hosting.js";
 import type { WebDisk } from "./hosting.js";
 import type { HostingHelper } from "./hosting-helper.js";
+import { ContentStore } from "./content.js";
+import type { ContentWrite, PageContent } from "@j-web/contracts";
 const ROUTES = new Set([
   "GET /health/live",
   "GET /health/ready",
   "GET /web/sites",
   "GET /web/sites/:id",
   "GET /web/sites/:id/hosting",
+  "GET /web/sites/hosting",
+  "GET /web/sites/:id/dns",
+  "GET /web/sites/:id/content",
+  "PUT /web/sites/:id/content",
+  "POST /web/sites/:id/preview",
   "POST /web/sites",
   "POST /web/sites/:id/retry",
   "POST /web/sites/:id/account-password",
@@ -47,6 +54,7 @@ export function createApp(options: {
   });
   const member = memberGate(options);
   const hosting = new Hosting(options);
+  const content = new ContentStore(options.pool, options.tenant);
   app.addHook("onRoute", (route) => {
     if (!ROUTES.has(`${route.method} ${route.url}`))
       throw new Error("Route access must be declared.");
@@ -106,6 +114,98 @@ export function createApp(options: {
     additionalProperties: false,
     properties: { password },
   };
+  const logo = {
+    anyOf: [
+      { type: "null" },
+      {
+        type: "object",
+        additionalProperties: false,
+        required: ["mimeType", "base64"],
+        properties: {
+          mimeType: { const: "image/png" },
+          base64: { type: "string", maxLength: 1398104 },
+        },
+      },
+    ],
+  };
+  const contentSchema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["name", "introduction", "contact", "logo"],
+    properties: {
+      name: { type: "string", minLength: 1, maxLength: 120 },
+      introduction: { type: "string", maxLength: 4096 },
+      contact: { type: "string", maxLength: 512 },
+      logo,
+    },
+  };
+  app.get<{ Querystring: { limit: number; after?: string } }>(
+    WEB_PATHS.hosting,
+    {
+      schema: {
+        querystring: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            limit: { type: "integer", minimum: 1, maximum: 100, default: 50 },
+            after: { type: "string", format: "uuid" },
+          },
+        },
+      },
+    },
+    (r) => hosting.listDetails(r.query.limit, r.query.after),
+  );
+  app.get<{ Params: { id: string } }>(
+    WEB_PATHS.sites + "/:id/dns",
+    { schema: { params, querystring: emptyQuery } },
+    (r) => hosting.dns(r.params.id),
+  );
+  app.get<{ Params: { id: string } }>(
+    WEB_PATHS.sites + "/:id/content",
+    { schema: { params, querystring: emptyQuery } },
+    (r) => content.read(r.params.id),
+  );
+  app.put<{ Params: { id: string }; Body: ContentWrite }>(
+    WEB_PATHS.sites + "/:id/content",
+    {
+      bodyLimit: 1500000,
+      schema: {
+        params,
+        querystring: emptyQuery,
+        body: {
+          type: "object",
+          additionalProperties: false,
+          required: ["expectedRevision", "content"],
+          properties: {
+            expectedRevision: {
+              type: "integer",
+              minimum: 0,
+              maximum: 2147483646,
+            },
+            content: contentSchema,
+          },
+        },
+      },
+    },
+    (r) => content.save(r.params.id, r.body),
+  );
+  app.post<{ Params: { id: string }; Body: { content: PageContent } }>(
+    WEB_PATHS.sites + "/:id/preview",
+    {
+      bodyLimit: 1500000,
+      schema: {
+        params,
+        querystring: emptyQuery,
+        body: {
+          type: "object",
+          additionalProperties: false,
+          required: ["content"],
+          properties: { content: contentSchema },
+        },
+      },
+    },
+    (r) => content.preview(r.params.id, r.body.content),
+  );
   app.post<{ Body: { domain: string; password?: string } }>(
     WEB_PATHS.sites,
     {

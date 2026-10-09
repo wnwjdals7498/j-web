@@ -2,7 +2,7 @@
   "name": "@j-web/contracts",
   "version": "0.1.0",
   "type": "module",
-  "description": "web member management foundation contracts (visitor/hosting lifecycle excluded)",
+  "description": "fixed member hosting, DNS, content and readonly preview contracts; public deployment policy excluded",
   "files": [
     "dist",
     "README.md",

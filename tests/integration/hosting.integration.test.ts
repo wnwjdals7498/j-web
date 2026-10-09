@@ -4,6 +4,7 @@ import { integrationRuntime } from "./runtime.js";
 import type { Runtime } from "./runtime.js";
 import { hostingRuntime } from "../hosting/runtime.mjs";
 import type { HostingFixture } from "../hosting/runtime.mjs";
+import { readFile } from "node:fs/promises";
 describe("actual web write lifecycle with PostgreSQL, exchanged members and root hosting daemons", () => {
   let r: Runtime,
     h: HostingFixture,
@@ -124,6 +125,167 @@ describe("actual web write lifecycle with PostgreSQL, exchanged members and root
       [r.fixtures[0]!.tenant],
     );
     for (const row of rows.rows) expect(row.value).not.toContain(password);
+  });
+  it("stores validated page revisions in PostgreSQL and previews without changing the uploaded public file", async () => {
+    expect(
+      await (await call("/" + id + "/content", "GET", undefined, 1)).json(),
+    ).toEqual({ siteId: id, revision: 0, content: null });
+    const png = await readFile(
+      new URL("../fixtures/logo-rgba.png", import.meta.url),
+    );
+    const content = {
+      name: "<script>bad()</script>",
+      introduction: "<img src=x onerror=bad()>",
+      contact: "&<>",
+      logo: { mimeType: "image/png", base64: png.toString("base64") },
+    };
+    const preview = await call("/" + id + "/preview", "POST", { content });
+    expect(preview.status).toBe(200);
+    const result = (await preview.json()) as {
+      html: string;
+      widgetSnippet: string;
+    };
+    expect(result.html).toContain("&lt;script&gt;bad()&lt;/script&gt;");
+    expect(result.html).toContain("script-src 'none'");
+    expect(result.html).toContain(result.widgetSnippet);
+    expect(result.widgetSnippet).toContain(
+      "gw." + r.fixtures[0]!.tenant + ".jgw.test/ext/talk/v1/widget.min.js",
+    );
+    const saves = await Promise.all([
+      call("/" + id + "/content", "PUT", { expectedRevision: 0, content }),
+      call("/" + id + "/content", "PUT", { expectedRevision: 0, content }),
+    ]);
+    expect(saves.map((v) => v.status).sort()).toEqual([200, 409]);
+    const stored = await call("/" + id + "/content", "GET", undefined, 1);
+    expect(await stored.json()).toEqual({ siteId: id, revision: 1, content });
+    const restarted = await r.newApp(r.fixtures[0]!.tenant);
+    expect(
+      await (
+        await r.fetch(
+          `https://auth.jgw.test:${restarted}/web/sites/${id}/content`,
+          { headers: { Authorization: "Bearer " + r.actors[1]!.token } },
+        )
+      ).json(),
+    ).toEqual({ siteId: id, revision: 1, content });
+    await h.protocols({
+      action: "https",
+      domain: "api-hosting.jgw.test",
+      data: "api-sftp-byte-proof",
+    });
+    expect(
+      (
+        await r.pool.query(
+          "SELECT revision,content FROM site_content WHERE tenant_id=$1 AND site_id=$2",
+          [r.fixtures[0]!.tenant, id],
+        )
+      ).rows[0],
+    ).toEqual({ revision: 1, content });
+  });
+  it("enforces content authorization, tenant ownership, stale revisions and format errors before changing the stored page", async () => {
+    const content = {
+      name: "Example",
+      introduction: "Intro",
+      contact: "Contact",
+      logo: null,
+    };
+    for (const actor of [1, 2])
+      for (const operation of ["content", "preview"])
+        expect(
+          (
+            await call(
+              "/" + id + "/" + operation,
+              operation === "content" ? "PUT" : "POST",
+              operation === "content"
+                ? { expectedRevision: 1, content }
+                : { content },
+              actor,
+            )
+          ).status,
+        ).toBe(403);
+    for (const operation of ["content", "preview"]) {
+      const response = await r.fetch(
+        `https://auth.jgw.test:55051/web/sites/${id}/${operation}`,
+        {
+          method: operation === "content" ? "PUT" : "POST",
+          headers: {
+            Authorization: "Bearer " + r.foreign,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(
+            operation === "content"
+              ? { expectedRevision: 1, content }
+              : { content },
+          ),
+        },
+      );
+      expect(response.status).toBe(404);
+    }
+    expect(
+      (
+        await call("/" + id + "/content", "PUT", {
+          expectedRevision: 0,
+          content,
+        })
+      ).status,
+    ).toBe(409);
+    for (const value of [
+      { ...content, path: "/srv/jweb/sites/other" },
+      { ...content, name: "가".repeat(41) },
+      { ...content, logo: { mimeType: "image/svg+xml", base64: "PHN2Zy8+" } },
+      { ...content, logo: { mimeType: "image/png", base64: "AAAA" } },
+    ])
+      expect(
+        (
+          await call("/" + id + "/content", "PUT", {
+            expectedRevision: 1,
+            content: value,
+          })
+        ).status,
+      ).toBe(400);
+    expect(
+      (await call("/" + id + "/content", "GET", undefined, 2)).status,
+    ).toBe(403);
+    expect(
+      (
+        await r.pool.query(
+          "SELECT revision FROM site_content WHERE tenant_id=$1 AND site_id=$2",
+          [r.fixtures[0]!.tenant, id],
+        )
+      ).rows[0]?.revision,
+    ).toBe(1);
+    expect(
+      (await call("/" + id + "/deploy", "POST", { expectedRevision: 1 }))
+        .status,
+    ).toBe(404);
+  });
+  it("lists actual disk usage and DNS/hosts advice with tenant pagination and no DNS write or secret exposure", async () => {
+    const response = await call("/hosting?limit=1", "GET", undefined, 1);
+    expect(response.status).toBe(200);
+    const list = (await response.json()) as {
+      items: {
+        id: string;
+        usedBytes: string;
+        disk: { availableBytes: string };
+      }[];
+      next: string | null;
+    };
+    expect(list.items).toHaveLength(1);
+    expect(list.items[0]!.id).toBe(id);
+    expect(BigInt(list.items[0]!.usedBytes)).toBeGreaterThan(0n);
+    expect(BigInt(list.items[0]!.disk.availableBytes)).toBeGreaterThan(0n);
+    expect(
+      await (await call("/" + id + "/dns", "GET", undefined, 1)).json(),
+    ).toEqual({
+      type: "A",
+      name: "api-hosting.jgw.test",
+      address: "192.0.2.55",
+      guidance: "DNS는 등록처·DNS 서비스에서 별도 관리합니다.",
+      hostsEntry: "192.0.2.55 api-hosting.jgw.test",
+    });
+    expect(JSON.stringify(list)).not.toContain(password);
+    expect((await call("/hosting?path=/etc", "GET", undefined, 1)).status).toBe(
+      400,
+    );
   });
   it("preserves actual failed nginx stage and retries the same id without creating another account or site", async () => {
     await h.exec([

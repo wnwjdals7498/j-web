@@ -20,7 +20,8 @@
     "lint": "eslint apps packages tests scripts deploy/jweb-helper.mjs",
     "format:check": "prettier --check apps packages tests scripts deploy/jweb-helper.mjs *.config.ts eslint.config.mjs",
     "start": "node apps/server/dist/main.js",
-    "disk:probe": "npm run build && node apps/server/dist/disk-cli.js"
+    "disk:probe": "npm run build && node apps/server/dist/disk-cli.js",
+    "test:registry": "node --test tests/registry/contracts.test.mjs"
   },
   "devDependencies": {
     "@types/node": "22.20.4",

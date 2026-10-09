@@ -1,7 +1,8 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import type { Pool, PoolClient } from "pg";
-import type { SiteView } from "@j-web/contracts";
+import { isSiteDomain } from "@j-web/contracts";
+import type { SiteView, DnsAdvice } from "@j-web/contracts";
 import { ApiError, missing } from "./errors.js";
 import { probeDataDisk, measureSiteUsage } from "./disk.js";
 import { SudoHostingHelper } from "./hosting-helper.js";
@@ -190,26 +191,7 @@ export class Hosting {
     };
   }
   async create(domain: string, inputPassword?: string) {
-    if (
-      domain.length > 253 ||
-      !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(domain) ||
-      domain
-        .split(".")
-        .some(
-          (label) =>
-            !label ||
-            label.length > 63 ||
-            label.startsWith("-") ||
-            label.endsWith("-"),
-        ) ||
-      !domain.endsWith(this.options.domainSuffix ?? ".jgw.test") ||
-      [
-        "auth.jgw.test",
-        "jauth.jgw.test",
-        "console.jgw.test",
-        `gw.${this.options.tenant}.jgw.test`,
-      ].includes(domain)
-    )
+    if (!isSiteDomain(domain, this.options.tenant, this.options.domainSuffix))
       throw new ApiError(400, "invalid_domain", "Invalid site domain.");
     const password = this.password(inputPassword);
     await this.mounted();
@@ -288,6 +270,57 @@ export class Hosting {
     const site = result.rows[0];
     if (!site) throw missing();
     const disk = await this.mounted();
+    return this.view(site, disk);
+  }
+  async dns(id: string): Promise<DnsAdvice> {
+    const result = await this.options.pool.query<{ domain: string }>(
+      "SELECT domain FROM sites WHERE tenant_id=$1 AND site_id=$2",
+      [this.options.tenant, id],
+    );
+    const site = result.rows[0];
+    if (!site) throw missing();
+    return {
+      type: "A",
+      name: site.domain,
+      address: this.options.customerAddress ?? null,
+      guidance: "DNS는 등록처·DNS 서비스에서 별도 관리합니다.",
+      hostsEntry: this.options.customerAddress
+        ? this.options.customerAddress + " " + site.domain
+        : null,
+    };
+  }
+  async listDetails(limit: number, after?: string) {
+    const result = await this.options.pool.query<
+      StoredSite & { error: string | null }
+    >(
+      "SELECT site_id AS id, domain, state, account_name AS account, operation_phase AS phase, last_error AS error FROM sites WHERE tenant_id=$1 AND ($2::uuid IS NULL OR site_id>$2) ORDER BY site_id LIMIT $3",
+      [this.options.tenant, after ?? null, limit + 1],
+    );
+    const disk = await this.mounted(),
+      rows = result.rows.slice(0, limit);
+    const items: Awaited<ReturnType<Hosting["view"]>>[] = new Array(
+      rows.length,
+    );
+    let next = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(4, rows.length) }, async () => {
+        for (;;) {
+          const index = next++;
+          if (index >= rows.length) return;
+          items[index] = await this.view(rows[index]!, disk);
+        }
+      }),
+    );
+    return {
+      items,
+      next: result.rows.length > limit ? items.at(-1)!.id : null,
+    };
+  }
+  private async view(
+    site: StoredSite & { error: string | null },
+    disk: Awaited<ReturnType<WebDisk["probe"]>>,
+  ) {
+    const id = site.id;
     let usedBytes: string | null = null;
     if (
       site.phase !== "unmanaged" &&
